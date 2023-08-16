@@ -1,0 +1,2758 @@
+---
+title: "Diff_expAnalysis"
+author: "Mohammed El Belbesy"
+output:
+  html_notebook: default
+  pdf_document: default
+---
+
+
+<br><br>
+
+### Libraries used in the analysis
+
+```{r}
+library(DESeq2)
+library(RColorBrewer)
+library(Biobase)
+library(pheatmap)
+library(annotables)
+library(openxlsx)
+library(rio)
+library(tidyverse)
+```
+
+
+<br><br>
+
+### Importing feature counts table
+
+```{r}
+counts_data<- read.table ("featurecounts.txt", header=T, row.names = 1)
+```
+
+
+
+```{r}
+#head(counts_GSEA)
+```
+
+<br><br>
+
+### Data Manipulation 
+```{r}
+head(counts_data) #view the counts_data table 
+```
+<br><br>
+
+#### removing the first 5 columns
+```{r}
+counts_data <- counts_data [ ,6:ncol(counts_data)] 
+#head(counts_data)
+```
+
+<br><br>
+
+#### Renamaming Columns
+```{r}
+colnames(counts_data) <- c("NHEM76","NHEM77","Sbcl2_64","Sbcl2_70","WM1158_68","WM1158_74","WM1366_66","WM1366_72","WM3211_65","WM3211_71","WM793_67","WM793_73","WM9_69","WM9_75")
+```
+
+
+
+```{r}
+head(counts_data)
+```
+<br><br>
+
+#### Reordering coloumns
+```{r}
+# Getting columns names and positions
+colnames(counts_data)
+```
+
+
+```{r}
+#Rearranging by columns positions 
+counts_data <- counts_data[, c(1, 2, 3, 4, 7, 8, 9, 10, 11, 12, 13, 14, 5, 6)]
+```
+This step is important, to be able to group them when creating the metadata needed for the DESeq2 object.
+
+
+```{r}
+head(counts_data)
+```
+<br><br>
+
+#### Pre-Filtering
+
+Filtering out the lowly expressed genes and checking the dimension of the data set. 
+We will make it more than 10 because lowly expressed genes are kind of hard to measure for differential expression e.g 1 read or 2 reads.
+
+
+```{r}
+dim(counts_data) #before
+counts_data <- counts_data [rowSums(counts_data) > 10, ]
+dim(counts_data) #after
+```
+rows is reduced from 58721 to 26574    
+<br> <br>
+
+#### Getting rid off Enseml IDs version
+
+* For genes (i.e. Ensembl identifiers of the form ENSG*), the version number increments when the set of transcripts linked to a gene changes. 
+
+* The "dot digit" representing distinct version numbers associated with stable Ensembl identifiers must be removed from the Ensembl gene id.[Ensembl Documentation stable IDS](<http://asia.ensembl.org/info/genome/stable_ids/index.html>).
+
+* This is important to be able to match them with grcm38 dataset in "annotables" package.
+
+```{r}
+tmp=gsub("\\..*","",row.names(counts_data))
+```
+
+
+
+```{r}
+rownames(counts_data) <- tmp
+head(counts_data)
+```
+<br><br>
+
+### DESeq2 analysis Workflow 
+
+* To perform any analysis with DESeq2, we need to create a DESeq2 object by providing the raw counts, metadata, and design formula. 
+* DESeq2 object  is a list-like object.
+
+<br><br>
+
+#### Creating a metadata frame
+```{r}
+group<- factor(c("NHEM","NHEM","Sbcl2","Sbcl2","WM1366","WM1366","WM3211","WM3211","WM793","WM793","WM9","WM9","WM1158","WM1158"))
+
+con<- factor(c(rep("normal",2), rep("radial",2), rep("vertical",6), rep("metastasis",4)))
+```
+<br> 
+
+
+colData variable will be our metadata 
+```{r}
+colData <- data.frame(row.names=colnames(counts_data), group, con)
+colData
+```
+
+
+```{r}
+#Checking whether the row names in colData matches to column names in counts_data
+all(colnames(counts_data) %in% rownames(colData))
+```
+
+```{r}
+# Ensure that the sample names are in the same order in both datasets,
+all(colnames(counts_data) == rownames(colData))
+```
+
+If not, we can modify this with match() function.
+
+<br> <br>
+
+#### Colors for plots
+
+```{r}
+mycols <- brewer.pal(11, "Set3")[1:length(unique(group))]
+```
+
+<br><br>
+
+### Create DESeqDataSet Object 
+* As input, the DESeq2 package expects count data as obtained, e.g., from RNA-seq in the form of a matrix of integer values which should be un-normalized counts.
+ 
+
+* Because the DESeq2 model corrects for library size internally, converted or normalized numbers should not be given as input, such as counts scaled by library size.
+
+```{r}
+dds<- DESeqDataSetFromMatrix (countData= counts_data, colData=colData, design= ~ con)
+```
+
+
+```{r}
+head(counts(dds))
+```
+
+<br><br>
+
+### Checking the design of your DESEeqDataSets
+
+```{r}
+design(dds)
+```
+
+* We now have a DESeq2 object (dds) containing our raw counts and metadata, and we want to do quality control on our samples. As a result, the normalized counts must be generated (normalized for library size, which is the total number of gene counts per sample, while accounting for library composition).
+
+* To evaluate the sample-level quality control matrix, the first step in the process is to normalize the raw counts.
+
+what is meant by normalized raw counts ? 
+<br>
+
+* The raw counts represent the number of reads aligning to each gene and should be proportional to the RNA expression in the sample; however, there are additional factors that can influence the number of genes aligning to each gene besides RNA expression.
+
+* Using normalization methods, we may alter the count data to remove the influence of these factors and remove the overall counts.
+<br>
+
+**Library depth**, **gene length**, and **RNA composition** are three of the most important parameters to consider when normalizing count data.
+
+* If the library sizes of two samples differ, many more reads may be mapped to genes in one sample than in the other. 
+
+In terms of **gene length**, a longer gene results in a longer transcript, which results in more fragments for sequencing. As a result, a longer gene with the same amount of expression will have more counts than a shorter gene. Therefore, when comparing the expression levels of various genes, the lengths of the genes must be taken into account.
+
+<br><br>
+
+#### Creating the estimateSizeFactors. 
+
+* When adjusting for **library size**, the library's composition is also crucial to consider. Many normalization methods that are not resistant to outliers can be skewed by a few highly expressed genes.
+
+* Normalization for the majority of genes would be skewed by the highly expressed DE gene if we only divided our counts by the total number of reads.
+As a result, we need to use a technique that is resistant to these outlier genes when performing a DE analysis.
+
+* DESeq2 normalizes using the "median of ratios" method. which accounts for library size when computing raw counts and is resistant to large numbers of differentially expressed genes.
+
+* For normalization, the raw counts of each sample will be divided by the sample-specific size factor.
+
+<br><br><br>
+
+#### Estimating size factor
+* We will create a data table with read counts normalized by library size 
+
+* Because we have different library sizes for the same number of genes, we need to make a ratio between them, therefore we'll multiply every position by this size factor, which we can achieve by estimating size factors.
+
+```{r}
+dds <- estimateSizeFactors(dds)
+sizeFactors(dds)# to view the size factors used for normalization 
+```
+
+```{r}
+colData(dds)
+```
+
+
+```{r}
+head(counts(dds)) #un-normalized
+```
+
+<br><br>
+
+#### Extract the normalized counts
+Now we have the size factors been calculated, and added to the DESeq2 object, the normalized counts can be extracted from it using the counts() function.
+```{r}
+norm_counts<- counts(dds, normalized = TRUE)
+head(norm_counts)
+```
+
+```{r}
+sum(is.na(norm_counts))
+```
+
+#### GSEA save normalized counts for the GSEA
+```{r}
+gsea_file <- read_delim("ddsNormSF.txt", "\t", escape_double = FALSE, trim_ws = TRUE)
+```
+
+```{r}
+head(gsea_file)
+```
+```{r}
+write.table(gsea_file, file = "gsea_inputfile.txt", quote = FALSE, row.names = FALSE, sep = "\t")
+```
+
+
+```{r}
+#test12 <- read.delim("ddsNormSF2.txt")
+#head(test12)
+#read_delim("file.txt", "\t", escape_double = FALSE, trim_ws = TRUE)
+#write.table(df, file = "df.txt", quote = FALSE, row.names = FALSE, sep = "\t")
+
+```
+
+
+
+```{r}
+#save the normalized counts in a table
+#write.table(norm_counts, file = "C:/Users/melbe/Documents/R/R_Projects/Diff_Exp_thesis/ddsNormSF2.txt", sep = "\t", col.names = NA)
+
+```
+
+Now that we've normalized the counts, we can move on to the next step of our analysis. We can now compare the counts between the different samples because the counts have been normalized for library size.
+
+<br><br> 
+
+#### Quality assessment of our samples
+
+* To measure the quality of our experiment, we can look at how the samples relate in terms of gene expression.
+
+* Visualization approaches for unsupervised clustering analyses, such as hierarchical heatmaps and principal component analysis PCA, are used to do this.
+
+* These QC approaches are used to determine how comparable the biological replicates are to one another, as well as to detect outlier samples and major sources of variation in the data set.
+
+* To better the visualization of the clustering, we should first use the log to transform the normalized counts before using these Visualization methods. DESeq2 applies a variance stabilizing transformation (VST) to RNA-Seq data, which is a logarithmic transformation that reduces variance across the mean.
+
+<br><br>
+
+#### Transform the normalized counts 
+
+The DESeq2 vst() function on the DESeq2 object can be used to transform the normalized counts.
+The blind = True argument indicates that the transformation should be blind to the sample information provided in the design formula; this argument should be stated during the quality evaluation.
+
+```{r}
+vsd <- vst(dds, blind = TRUE)
+```
+
+<br><br>
+
+#### Heatmaps
+
+* To assess the similarity and gene expression between different samples in a dataset, hierarchical clustering with heatmaps is used. 
+
+* This method is used to determine how similar replicates are to one another and whether samples from various sample groups cluster together or separately. The heatmap is made by combining the gene expression correlation values for all pairwise combinations of samples in the data set, with 1 being the perfect correlation.
+
+* The heatmap's colors reflect the correlation values, while the hierarchical tree shows which samples are more similar to one another. The biological replicates should be grouped together, whereas the sample conditions should be separated. Because the majority of genes should not be differentially expressed, samples should have a high correlation.
+
+
+
+* Samples having correlation values less than 0.8 may need to be investigated further to see if they are outliers or have contamination.
+
+<br><br>
+
+##### Extract the matrix of transformed counts
+To make a heatmap, we'll use the assay() function to extract the VST-transformed normalized counts as a matrix from a vsd object.
+The pairwise correlation values between each pair of samples can then be computed using the cor() function.
+
+```{r}
+vsd_mat <- assay(vsd) 
+```
+
+<br><br>
+
+#### Computing the correlation values between samples
+```{r}
+vsd_cor <- cor(vsd_mat)
+```
+
+<br><br>
+ 
+##### Plot the heatmap
+* To create the heatmap, we can use the pheatmap package after generating the correlation values.
+* The annotation arguments determine which meta data factors should be used as annotation bars. To select the condition column in colData1, we use the select () function from the dplyr package. The heat map's output shows that the biological replicates are clustered together and the condition is separated.
+
+```{r}
+pheatmap(vsd_cor, annotation = dplyr::select(colData, con))
+```
+The biological replicates are clustered together, while the samples from various conditions are clustered separately. There are no outliers or samples with low correlation values when compared to the rest of the data.
+
+<br><br>
+
+#### Pricipal component analysis PCA
+* In order to continue evaluating the quality of our samples, we will use PCA to see how our samples cluster and whether our condition of interest corresponds to the principal components explaining the most variation in the data.
+
+
+* PCA is a technique for emphasizing the variation in a dataset. The first principal component, or PCA1, represents the greatest amount of variance in the data.
+
+* we could plot the normalized counts of every gene for one sample in the x-axis and the other sample on the y-axis. 
+PC2, the dataset's second most variation, must be perpendicular to PC1 in order to best describe the variance in the dataset not included in PC1. PC2 has a much smaller spread.
+
+* The number of principal components in the dataset is equal to the number of samples, n. PC1 means plotting a line through n-dimensional space to find the greatest amount of variation. 
+
+* The principal component with the most variant genes has the greatest influence on the direction of that principal component.
+Genes are given quantitative scores based on how much they influence the various PCs.
+The product of the influence and the normalized read counts for each gene is multiplied by all genes to get a 'per sample' PC value.We usually plot these per-sample PC values for PCA.
+
+
+* The gene expression profiles of samples that cluster together are more similar than those of samples that cluster apart, especially for the most variant genes.
+As we hope to see replicated clusters together and conditions to separate on PC1, this is a good method to explore the quality of the data.
+
+* This method can also be used to identify sample outliers and major sources of variation.
+
+
+```{r}
+plotPCA(vsd, intgroup = 'con')
+```
+For the PCA plot generated in the previous part, the output regarding the quality of the samples shows that The biological replicates tend to cluster together. The samples separate by condition on PC1.
+
+<br> <br>
+
+
+#### DE analysis 
+##### fitting the raw counts to the DESeq2 model. 
+* Estimated size factors for each gene, as well as the variation in expression across replicates were evaluated. The data can then be fitted to the negative binomial model using these calculations.
+
+* A DESeq2 object containing the raw data, metadata, and *design* formula has already been created. The design formula tells DESeq2 which known major source of variation to control, for, or regress out, as well as which condition of interest to use for differential expression testing.
+
+
+```{r}
+#run the analysis
+dds <- DESeq(dds)
+```
+
+The final DESeq2 object will have all of the data required to perform differential expression analysis between different sample groups.
+
+```{r}
+resultsNames(dds)
+```
+
+???????????
+
+### set factor level
+```{r}
+dds$con <- relevel(dds$con, ref = "normal")
+```
+
+
+
+```{r}
+#run the analysis again
+dds <- DESeq(dds)
+```
+
+```{r}
+resultsNames(dds)
+```
+
+???????????
+
+
+
+#### Exploring the results
+* The raw counts are modeled using the dispersion estimates; we should investigate how the raw data will match the model.
+
+* The purpose of DE analysis is to see if the mean expression of a gene differs between sample groups when there is variation within groups.
+This is accomplished by determining whether the difference in log2 fold changes between groups is significantly different from zero.
+
+* The log2 fold changes are calculated by dividing the mean of one sample group by the mean of the other sample group. As a result, information regarding the mean and variation in the data is required to model the counts.
+
+<br><br>
+
+#### Plotting Dispersion
+
+* We'll look at the variance in gene expression relative to the mean to see how our data varies.
+
+* Variance is the square of the standard deviation, representing how far away the expression of the individual samples, are from the means. 
+
+*The variance is expected to increase with the gene's mean expression in RNA-Seq data. To observe this relationship, we can use the apply() function to calculate the means and variances for each gene in the normal samples.
+Then, using ggplot2, we create a data frame for plotting.
+The log10 scales can be used to plot the mean and variance for each gene.
+
+* we can plot the mean and variance for each gene using the log10 scales.
+
+
+* In the DESeq2 model, a metric called dispersion describes a measure of variance for a given mean to assess the variability in expression.
+
+* Dispersion formula: Var = μ + α*μ^2 . 
+
+```{r}
+plotDispEsts(dds)
+```
+* Each black dot represents a gene, with associated mean and dispersion values. With RNA seq data, the variance of gene expression increases as the mean decreases, which is to be expected. Also, notice how the variance range for lower mean counts is wider than for higher mean counts.
+
+* As the mean increases, the dispersion values decrease. The increase in variance, on the other hand, increases dispersion.
+
+* Because gene-wise estimates of dispersion are often misleading in RNA-seq experiments with only a few replicates, DESeq2 uses information from all genes to determine the most likely estimates of dispersion for a given mean expression value, as shown by the red line in the figure.
+
+
+* Genes with inaccurately tiny estimates of variation could return many false postives, or genes classified as DE, when they are really not. Therefore, the original gene-wise dispersion estimates, shown as the black dots in the figure, are shrunken towards the curve to yield more accurate estimates of dispersion. 
+
+* For identifying the differentially expressed genes, the more accurate, shrunken dispersion estimates are applied to model the counts.
+
+*Extremely high dispersion values, encircled by blue circles, aren't shrunk since there's a chance the gene has more variability than others for biological or technical reasons, and lowering the variability could lead to false positives. 
+
+* The strength of the shrinkage is determined by the sample size and distance from the curve. A large number of replicates allows for more accurate estimation of the mean and variation, resulting in less shrinkage.
+In the figure, The dispersions decrease with increasing mean and cluster around the maximum likelihood (ML) line, indicating a satisfactory match.
+
+<br><br>
+
+#### First comparison Normal Vs radial growth phase "RGP"
+we will try to find the significant genes during the development of cancer cells from melanocytes to the Radial growth phase. 
+
+#### Extraction of results (normal vs RGP)
+* Now that we have explored the fit of our data to the model, we can extract the DE testing model.
+
+* We can also get more precise foldchange estimates, which measure the expression of one sample group compared to another. The Wald test is used by DESeq2 to compare two sample groups for the condition of interest, in this case "normal and radial growth Phase."
+
+
+```{r}
+#sadad
+dds1_res <- results(dds, contrast = c("con", "radial", "normal"))
+dds1_res
+```
+
+
+
+log2 fold change : condition radial vs normal, stating that normal is the base level of comparison. Which means that all log2fold changes represent the radial group relative to the normal group. 
+
+
+#### The MA plot 
+For all genes analyzed, the MA plot depicts the mean of normalized counts vs log2foldchanges.
+
+```{r}
+plotMA(dds, ylim=c(-20,20))
+```
+
+* The genes with a significant DE are colored in blue. 
+* The large log2 foldchanges, especially for genes with lower mean count values, should be noted. Genes with less information, such as those with a low number of counts or high dispersion values, are unlikely to be as accurate as genes with more information.
+* We can use log2foldchange shrinkage to improve the estimated fold changes.
+
+
+#### LFC shrinkage 
+for genes with low amount of data available, shrinkage utilizes information from all genes to provide more likely, lower, log2 fold change estimates, similar to what we performed with dispersion.
+
+
+```{r}
+dds1_LFC <- lfcShrink(dds,
+                      coef = "con_radial_vs_normal" ,
+                      res = dds1_res)
+```
+
+
+
+
+```{r}
+plotMA(dds1_LFC, ylim=c(-20,20))
+
+```
+* The log2fold change values are now more restricted, especially for lowly expressed genes. 
+
+* The shrunken log2foldchanges should be more precise; however, shrinking the log2 foldchanges will not affect the number of differentially expressed genes returned, only the log2 fold change values.
+Now we can retrieve the significant DE genes and perform further visualization of results. 
+
+<br><br>
+
+### DESeq2 results table
+#### getting the description for the columns in the results table
+```{r}
+mcols(dds1_LFC)
+```
+
+<br><br>
+
+#### determine siginificant DE gene
+* We will use the p-value adjusted for the multiple test correction. Because, every gene tested with alpha equals to 0.05, meanst that there is a 5% chance that the gene is called as a DE when it is not, returning false positives. 
+For this reason, multiple test correction is performed by DESeq2 using Benjamin-Hochberg, or BH-method, to adjust the p-values for multiple testing and control the proportion of false postives relative to true.
+
+* If we had 1000 genes categorized as DE and used the BH-method with an alpha value of 0.05, we would expect 5% of the DE genes to be false positives or 50 genes.
+
+* Prior to testing, DESeq2 automatically filters out genes that are unlikely to be actually differentially expressed, such as genes with zero counts across all samples, genes with low mean values across all samples, and genes with dramatic count outlines, to limit the number of genes tested.
+
+```{r}
+head(dds1_LFC,n =10 )
+```
+The filtered genes are denoted by a NA in the p-adjusted column in the results table. 
+
+<br><br>
+
+#### Siginificant DE genes summary 
+```{r}
+summary(dds1_LFC)
+```
+Over 1000 genes are DE which is the sum of log fold changes less than zero and greater than zero. 
+
+```{r}
+summary(dds1_LFC, alpha = 0.05)
+```
+
+<br><br>
+
+##### Testing for siginifcant genes using both an alpha value threshold and a log2fold change threshold different from 0
+
+A log2fold change threshold could be used to return genes that are most likely to be biologically meaningful. A log2fold change threshold isn't always the best choice. It can, however, be useful when dealing with huge numbers of DE genes.
+
+```{r}
+#Rerun results function, Using 1.25 foldchange threshold which is 0.32 in the log2 scale 
+#dds1_res <- results(dds, 
+ #                  contrast = c("con", "radial", "normal"),
+  #                  alpha = 0.05,
+#                    lfcThreshold = 0.32) 
+#head(dds1_res)
+```
+While using any log2fold change cut-off raises the risk of losing biologically relevant genes, by using a very small log2 fold change threshold, we are aiming to reduce the risk that the more biologically relevant. 
+
+```{r}
+resultsNames(dds)
+```
+
+
+```{r}
+#Reshrink the foldchanges 
+dds1_LFC <- lfcShrink(dds,
+                      coef = "con_radial_vs_normal",
+                      res = dds1_res)
+```
+
+
+```{r}
+# Turn results table into a data frame 
+dds1_res_df <- data.frame(dds1_LFC)
+head (dds1_res_df)
+```
+
+
+
+#### Ordering the genes by padjusted values for GSEA
+```{r}
+dds1_GSEA <- dds1_res_df %>% arrange(padj)
+```
+
+#### save the dds1_res object in a table to use it for GSEA
+```{r}
+#write.table(dds1_res, file = "DE_VGP_MET.txt", sep = " ", col.names = NA)
+```
+
+```{r}
+#grcm38
+```
+
+```{r}
+
+dds1_res_anno <- rownames_to_column(dds1_res_df, var = "ensgene") 
+head(dds1_res_anno)
+```
+
+```{r}
+hm_annotables <- grch38[, c( "ensgene", "symbol", "description")]
+
+dds_test <- merge(dds1_res_anno, hm_annotables, by.x = "ensgene", by.y = "ensgene", all.x = T )
+```
+
+```{r}
+#dds_test <- dds_test%>% dplyr::select(-ends_with(".y"))
+```
+
+
+```{r}
+head(dds_test) 
+
+```
+
+
+```{r}
+head(grch38)
+```
+
+
+
+```{r}
+dds1_res_anno <- left_join(x = dds1_res_anno,
+                 y = grch38[ , c("ensgene", "symbol", "description")],
+                  by = c("ensgene"))
+```
+
+#### Remove Duplicates
+```{r}
+#non_duplicates <- which(duplicated(ids$symbol) == FALSE)
+
+```
+
+
+
+```{r}
+head(dds1_res_anno)
+```
+
+```{r}
+head(dds1_LFC)
+```
+
+
+```{r}
+head(grch38)
+```
+
+<br><br>
+
+#### Extracting the siginficant DE genes
+```{r}
+dds1_sig <- subset(dds1_res_anno, padj < 0.05)
+```
+
+<br><br>
+
+#### Ordering the genes by padjusted values 
+```{r}
+dds1_sig <- dds1_sig %>% arrange(padj)
+```
+<br><br> 
+
+#### Exploring the final table 
+```{r}
+View(dds1_sig)
+```
+
+```{r}
+dds1_first20 <- dds1_sig[1:20,]
+View(dds1_first20)
+write.csv(dds1_first20, "dds1_first20.csv", row.names = F)
+```
+
+
+<br><br>
+
+### Visualization of the results
+
+#### Expression heatmap
+
+```{r}
+# Subset normalized counts to significant genes 
+sig1_norm_counts <- norm_counts[dds1_sig$ensgene,]
+
+# Choose a color palette from RColorBrewerlibrary(RColorBrewer)
+heat_colors <- brewer.pal(6,"YlOrRd")
+display.brewer.all()
+
+```
+
+```{r}
+# Run pheatmap
+pheatmap(sig1_norm_counts[1:30,],
+         color = heat_colors, 
+         cluster_rows =F,
+         show_rownames =T,
+         annotation = dplyr::select(colData, con),
+         scale ="row")
+```
+
+
+<br><br>
+
+#### Rlog Transformation for clustering and heatmaps 
+
+```{r}
+rld<- rlogTransformation(dds)
+head(assay(rld))
+```
+
+```{r}
+hist(assay(rld))
+
+```
+```{r}
+sampleDists <- as.matrix(dist(t(assay(rld))))
+
+```
+
+
+```{r}
+plotPCA(rld, intgroup="con")
+```
+
+
+```{r}
+plotPCA(vsd, intgroup = 'con')
+
+```
+
+#### Heatmap rld
+we (select) the genes for the heatmap in (order) and this order is selected by 
+(rowMeans) and select the (count) of my deseq data set (normalized) to library size and we want (decreasing) to have info about all upregulated
+and down regulated genes and set the number to present or to visualize [1:50] then we have to transform my normalized count and we select
+log2.norm.counts which i will use in the heatmap and then tell the heatmap that the annotation_col is the df (annotation_col=df)
+```{r}
+#rowmeans is wrong ????
+select1 <- order(rowMeans(counts(dds,normalized=TRUE)),decreasing=TRUE) [1:50]
+nt <- normTransform(dds) # defaults to log2(x+1)
+log2.norm.counts <- assay(nt)[select1,]
+df <- as.data.frame(colData(dds)[,c("group","con")])
+pheatmap(log2.norm.counts, cluster_rows=FALSE, show_rownames=TRUE,
+cluster_cols=FALSE, annotation_col=df, fontsize_row = 5)
+
+```
+From the heatmap we can Know the expression level of genes:
+Dark blue indicates very low expressed genes light blue indicates low expressed genes Red indicates very highly expressed genes
+
+
+
+###############################
+
+#### Heatmap of regularized log transformed dds counts
+```{r}
+df <- as.data.frame(colData(rld)[,c("con","group")])
+pheatmap(assay(rld)[select1,], cluster_rows=T, show_rownames=TRUE,
+cluster_cols=T, annotation_col=df, fontsize_row =8)
+```
+
+###################
+
+
+```{r}
+top1_20 <- data.frame(sig1_norm_counts)[1:20,]  %>% rownames_to_column(var ="ensgene")
+#key column will be a seperate column
+top1_20 <- gather(top1_20, key ="samplename", value ="normalized_counts",2:4)
+```
+  
+```{r}
+#head(sig1_norm_counts)
+```
+
+
+```{r}
+
+top1_20 <- inner_join(top1_20, rownames_to_column(colData, var ="samplename"),                     by ="samplename")
+```
+
+
+```{r}
+ggplot(top1_20)+ 
+  geom_point(aes(x = ensgene, y = normalized_counts, color = con))+        scale_y_log10()+    
+  xlab("Genes")+      
+  ylab("Normalized Counts")+       
+  ggtitle("Top 20 Significant DE Genes")+  
+  theme_bw()+    
+  theme(axis.text.x = element_text(angle =45, hjust =1))+  
+  theme(plot.title = element_text(hjust =0.5))
+
+```
+
+
+
+#####################################################
+# Test
+#good idea is to make symbol as rownames
+```{r}
+#top1_20_symbol <- data.frame(sig1_norm_counts)[1:20,]  %>% rownames_to_column(var ="symbol")
+#top1_20_symbol <- gather(top1_20, key ="samplename", value ="normalized_counts",2:4)
+```
+
+
+```{r}
+#top1_20_symbol <- data.frame(sig1_norm_symbol)[1:60,]  %>% rownames_to_column(var ="symbol")
+#top1_20_symbol <- gather(top1_20_symbol, key ="samplename", value ="normalized_counts",2:4)
+```
+
+
+```{r}
+#top1_20_symbol <- inner_join(top1_20_symbol, rownames_to_column(colData, var ="samplename"),                     by ="samplename")
+```
+
+```{r}
+#head(top1_20_smybol)
+```
+
+#############################
+
+```{r}
+# adding symbol to norm counts
+#sig1_norm_symbol <- rownames_to_column(dds1_res_df, var = "ensgene")
+
+#pick symbol from gr38
+#sig1_norm_symbol <- left_join(x = sig1_norm_symbol,
+        #         y = grch38[ , c("ensgene", "symbol")],
+         #         by = c("ensgene"))
+#
+#remove duplicates
+#sig1_norm_symbol <- unique(sig1_norm_symbol)
+
+#Order by p-adjusted Value
+#sig1_norm_symbol <- sig1_norm_symbol %>% arrange(padj)
+
+#get 1st 50
+#sig1_norm_symbol <- sig1_norm_symbol[1:70,]
+
+#change symbol to be rownames insted of ensembl ids
+#row.names(sig1_norm_symbol) <- sig1_norm_symbol$symbol
+
+#remove last column 
+#sig1_norm_symbol <- sig1_norm_symbol[,-7]
+
+
+```
+
+#another try
+
+```{r}
+
+## Subset normalized counts to significant genes 
+sig1_norm_symbol <- norm_counts[dds1_sig$ensgene,]
+
+#apply this to norm counts
+sig1_norm_symbol <- rownames_to_column(as.data.frame(sig1_norm_symbol), var = "ensgene")
+
+#pick symbol from gr38
+sig1_norm_symbol <- left_join(x =  sig1_norm_symbol,
+                 y = grch38[ , c("ensgene", "symbol")],
+                  by = c("ensgene"))
+
+#remove duplicates
+sig1_norm_symbol <- unique(sig1_norm_symbol)
+```
+
+```{r}
+top1_20_symbol <- data.frame(sig1_norm_symbol)[1:20,]  %>% rownames_to_column(var ="ids")
+
+#remove ids column
+top1_20_symbol <- top1_20_symbol[,-1]
+
+#key column will be a seperate column
+top1_20_symbol <- gather(top1_20_symbol, key ="samplename", value ="normalized_counts",2:4)
+```
+  
+
+```{r}
+
+top1_20_symbol <- inner_join(top1_20_symbol, rownames_to_column(colData, var ="samplename"),                     by ="samplename")
+```
+
+
+```{r}
+ggplot(top1_20_symbol)+ 
+  geom_point(aes(x = symbol, y = normalized_counts, color = con))+        scale_y_log10()+    
+  xlab("Genes")+      
+  ylab("Normalized Counts")+       
+  ggtitle("Top 20 Significant DE Genes")+  
+  theme_bw()+    
+  theme(axis.text.x = element_text(angle =45, hjust =1))+  
+  theme(plot.title = element_text(hjust =0.5))
+
+```
+
+#### Heatmap
+```{r}
+# Run pheatmap
+pheatmap(sig1_norm_counts[1:30,],
+         color = heat_colors, 
+         cluster_rows =F,
+         show_rownames =T,
+         annotation = dplyr::select(colData, con),
+         scale ="row")
+```
+
+
+
+```{r}
+head(sig1_norm_counts)
+```
+
+
+```{r}
+head(sig1_norm_symbol)
+```
+
+```{r}
+#remove duplicates
+sig1_norm_symbol <- unique(sig1_norm_symbol)
+
+#get 1st 50
+sig1_norm_symbol <- sig1_norm_symbol[1:70,]
+
+#change symbol to be rownames instead of ensembl ids
+row.names(sig1_norm_symbol) <- sig1_norm_symbol$symbol
+
+#remove first and last column 
+sig1_norm_symbol <- sig1_norm_symbol[,c(-1,-16)]
+```
+
+```{r}
+# Run pheatmap
+pheatmap(sig1_norm_symbol[1:30,],
+         color = heat_colors, 
+         cluster_rows =F,
+         show_rownames =T,
+         annotation = dplyr::select(colData, con),
+         scale ="row")
+```
+
+```{r}
+pheatmap(sig1_norm_symbol[1:30,],
+         #color = heat_colors, 
+         cluster_rows =F,
+         show_rownames =T,
+         annotation = dplyr::select(colData, con),cluster_cols=T,               fontsize_row = 7,
+         scale ="row")
+
+```
+
+
+```{r}
+# Run pheatmap
+pheatmap(sig1_norm_symbol[1:30,1:4],
+         #color = heat_colors, 
+         cluster_rows =F,
+         cluster_cols = F,
+         show_rownames =T,
+         annotation = dplyr::select(colData, con),
+         fontsize_row = 7,
+         scale ="row")
+```
+
+
+#############################################################################
+
+
+<br><br>
+
+### Releveling 
+
+
+
+Instead of using the revel() function to make multiple comparisons, we will subset the data to make the desired comparison clear. 
+<br><br>
+
+#### Secound comparison RGP Vs vertical growth phase "VGP"
+we will try to find the significant genes during the development of cancer cells from the Radial growth phase to vertical growth phase. 
+
+ 
+```{r}
+resultsNames(dds)
+```
+
+### set factor level
+```{r}
+dds$con <- relevel(dds$con, ref = "radial")
+```
+
+#### DE analysis 
+##### Fitting the raw counts to the DESeq2 model.
+```{r}
+#run the analysis again
+dds2 <- DESeq(dds)
+```
+
+```{r}
+resultsNames(dds2)
+```
+
+
+
+
+<br> <br>
+
+#### Colors for plots
+
+```{r}
+#mycols <- brewer.pal(11, "Set3")[1:length(unique(group1))]
+```
+
+
+<br><br>
+
+### Checking the design of your DESEeqDataSets
+
+```{r}
+design(dds2)
+```
+
+<br><br>
+
+
+```{r}
+head(counts(dds2)) #un-normalized
+```
+
+
+
+
+<br><br>
+
+#### Exploring the results
+ 
+```{r}
+plotDispEsts(dds2)
+```
+
+<br><br>
+
+#### Extract the DE testing model.
+
+
+# Extraction of results 
+```{r}
+
+dds2_res <- results(dds2, contrast = c("con", "vertical", "radial"))
+dds2_res
+```
+
+
+<br><br>
+
+#### The MA plot 
+ 
+```{r}
+plotMA(dds2, ylim=c(-20,20))
+```
+The genes that are significantly DE are colored blue. 
+
+<br><br>
+
+##### LFC shrinkage 
+
+
+```{r}
+dds2_LFC <- lfcShrink(dds2,
+                      coef = "con_vertical_vs_radial" ,
+                      res = dds2_res)
+```
+
+```{r}
+plotMA(dds2_LFC, ylim=c(-20,20))
+
+```
+
+<br><br>
+
+### DESeq2 results table
+#### Getting the description for the columns in the results table
+```{r}
+mcols(dds2_LFC)
+```
+
+<br><br>
+
+#### Determining the siginificant DE genes, 
+* We will use the adjusted p-value for the multiple test correction.
+
+* The reason for this is that for every gene tested with alpha 0.05, there is a 5% chance that the gene is called as a DE when it is not, yielding false positives.
+
+* Therefore, multiple test correction is performed by DESeq2 using Benjamin-Hochberg, or BH-method, to adjust the p-values for multiple testing and control the proportion of false postives relative to true.
+
+* Using BH-method and alpha value of 0.05, if we had 1000 genes identified as DE, we would expect 5% of the DE genes to be false positives, or 50 genes.
+to reduce the number of genes tested, DESeq2 automatically filters out genes unlikely to be truly differential expressed prior to testing, such as genes with zero counts across all samples, genes with low mean values across all samples, and genes with extreme count outlines. 
+
+```{r}
+head(dds2_LFC,n =10 )
+```
+We can see the filtered genes in the results table represented by an NA in the p-adjusted column. 
+
+<br><br>
+
+#### Siginificant DE genes summary 
+```{r}
+summary(dds2_LFC)
+```
+Over 4000 genes are DE which is the sum of log fold changes less than zero and greater than zero. 
+
+<br> <br>
+```{r}
+summary(dds2_LFC, alpha = 0.05)
+```
+
+<br><br>
+
+##### Testing for siginifcant genes using both an alpha value threshold and a log2fold change threshold different from 0
+```{r}
+#Rerun results function, Using 1.25 foldchange threshold which is 0.32 in the log2 scale 
+#remove lfcThreshold use lfc = 1??????
+dds2_res <- results(dds2, 
+                    contrast = c("con", "vertical", "radial"),
+                    alpha = 0.05,
+                    #lfcThreshold = 0.32
+                    ) 
+```
+
+ 
+
+```{r}
+#Reshrink the foldchanges 
+dds2_LFC <- lfcShrink(dds2,
+                      coef = "con_vertical_vs_radial" ,
+                      res = dds2_res)
+```
+
+<br><br>
+
+#### Annotaion of the genes
+We will use the "annotables" library to annotate the Ensembl genes.
+```{r}
+# Turn results table into a data frame 
+dds2_res_df <- data.frame(dds2_LFC)
+head (dds2_res_df)
+```
+
+```{r}
+head(grcm38)
+```
+
+```{r}
+
+dds2_res_anno <- rownames_to_column(dds2_res_df, var = "ensgene") 
+
+```
+
+```{r}
+dds2_res_anno <- left_join(x = dds2_res_anno,
+                 y = grch38[, c("ensgene", "symbol", "description")],
+                  by = c("ensgene"))
+```
+
+```{r}
+#View(dds2_res_anno)
+```
+
+<br><br>
+
+#### Extraction of the siginficant DE genes
+```{r}
+dds2_sig <- subset(dds2_res_anno, padj < 0.05)
+```
+<br><br>
+#### ordering the genes by p-adjusted values 
+```{r}
+dds2_sig <- dds2_sig %>% arrange(padj)
+head(dds2_sig)
+```
+
+```{r}
+head(dds2_sig)
+```
+```{r}
+dds2_first20 <- dds2_sig[1:20,]
+#View(dds2_first20)
+write.csv(dds2_first20, "dds2_first20.csv", row.names = F)
+```
+
+<br><br>
+
+#### Exploring the final table 
+```{r}
+#View(dds2_sig)
+```
+
+<br><br>
+
+### Visualization of the results
+
+#### Expression heatmap
+
+```{r}
+# Subset normalized counts to significant genes 
+sig_norm_counts2 <- norm_counts[dds2_sig$ensgene,]
+
+# Choose a color palette from RColorBrewerlibrary(RColorBrewer)
+heat_colors <- brewer.pal(6,"YlOrRd")
+display.brewer.all()
+
+```
+
+
+```{r}
+# Run pheatmap
+pheatmap(sig_norm_counts2,
+         color = heat_colors, 
+         cluster_rows =T,
+         show_rownames =F,
+         annotation = dplyr::select(colData, con),
+         scale ="row")
+
+```
+
+<br><br>
+
+#### Visualizing results-Expression plot
+
+```{r}
+top2_20 <- data.frame(sig_norm_counts2)[1:20,]  %>% rownames_to_column(var ="symbol")
+top2_20 <- gather(top2_20, key ="samplename", value ="normalized_counts",4:9)
+```
+
+
+```{r}
+top2_20 <- inner_join(top2_20, rownames_to_column(colData, var ="samplename"),                     by ="samplename")
+```
+
+
+```{r}
+ggplot(top2_20)+ 
+  geom_point(aes(x = symbol, y = normalized_counts, color = con))+        scale_y_log10()+    
+  xlab("Genes")+      
+  ylab("Normalized Counts")+       
+  ggtitle("Top 20 Significant DE Genes")+  
+  theme_bw()+    
+  theme(axis.text.x = element_text(angle =45, hjust =1))+  
+  theme(plot.title = element_text(hjust =0.5))
+
+```
+
+
+##########################
+
+
+```{r}
+
+## Subset normalized counts to significant genes 
+sig2_norm_symbol <- norm_counts[dds2_sig$ensgene,]
+
+#apply this to norm counts
+sig2_norm_symbol <- rownames_to_column(as.data.frame(sig2_norm_symbol), var = "ensgene")
+
+#pick symbol from gr38
+sig2_norm_symbol <- left_join(x =  sig2_norm_symbol,
+                 y = grch38[ , c("ensgene", "symbol")],
+                  by = c("ensgene"))
+
+#remove duplicates
+sig2_norm_symbol <- unique(sig2_norm_symbol)
+```
+
+```{r}
+head(sig2_norm_symbol)
+head(top2_20_symbol)
+```
+
+
+```{r}
+top2_20_symbol <- data.frame(sig2_norm_symbol)[1:20,]  %>% rownames_to_column(var ="ids")
+
+#remove ids column
+top2_20_symbol <- top2_20_symbol[,-1]
+
+#key column will be a seperate column
+top2_20_symbol <- gather(top2_20_symbol, key ="samplename", value ="normalized_counts",4:9)
+```
+  
+
+```{r}
+
+top2_20_symbol <- inner_join(top2_20_symbol, rownames_to_column(colData, var ="samplename"),                     by ="samplename")
+```
+
+
+```{r}
+ggplot(top2_20_symbol)+ 
+  geom_point(aes(x = symbol, y = normalized_counts, color = con))+        scale_y_log10()+    
+  xlab("Genes")+      
+  ylab("Normalized Counts")+       
+  ggtitle("Top 20 Significant DE Genes")+  
+  theme_bw()+    
+  theme(axis.text.x = element_text(angle =45, hjust =1))+  
+  theme(plot.title = element_text(hjust =0.5))
+
+```
+
+#### Heatmap
+
+
+
+```{r}
+#remove duplicates
+sig2_norm_symbol <- unique(sig2_norm_symbol)
+
+#get 1st 50
+sig2_norm_symbol <- sig2_norm_symbol[1:70,]
+
+#change symbol to be rownames instead of ensembl ids
+row.names(sig2_norm_symbol) <- sig2_norm_symbol$symbol
+
+#remove first and last column 
+sig2_norm_symbol <- sig2_norm_symbol[,c(-1,-16)]
+```
+
+```{r}
+# Run pheatmap
+pheatmap(sig2_norm_symbol[1:30,],
+         color = heat_colors, 
+         cluster_rows =F,
+         show_rownames =T,
+         annotation = dplyr::select(colData, con),
+         scale ="row")
+```
+
+```{r}
+pheatmap(sig2_norm_symbol[1:30,],
+         #color = heat_colors, 
+         cluster_rows =F,
+         show_rownames =T,
+         annotation = dplyr::select(colData, con),cluster_cols=T,               fontsize_row = 7,
+         scale ="row")
+
+```
+
+
+```{r}
+# Run pheatmap
+pheatmap(sig2_norm_symbol[1:30,3:10],
+         #color = heat_colors, 
+         cluster_rows =F,
+         cluster_cols = F,
+         show_rownames =T,
+         annotation = dplyr::select(colData, con),
+         fontsize_row = 7,
+         scale ="row")
+```
+
+
+
+####################
+
+
+---
+
+<br><br>
+
+#### Vertical growth phase (VGP) Vs Metastasis "MET"
+
+Now, we will move to the 3nd comparison and perform the analysis again. 
+we will try to find the significant genes during the development from the Vertical growth phase to the Metastasis.
+
+```{r}
+head(counts_data)
+```
+
+<br><br>
+
+
+```{r}
+resultsNames(dds)
+```
+
+### set factor level
+```{r}
+dds$con <- relevel(dds$con, ref = "vertical")
+```
+
+#### DE analysis 
+##### Fitting the raw counts to the DESeq2 model.
+```{r}
+#run the analysis again
+dds3 <- DESeq(dds)
+```
+
+```{r}
+resultsNames(dds3)
+```
+
+
+
+
+<br><br>
+
+
+#### Exploring the results
+ 
+```{r}
+plotDispEsts(dds3)
+```
+
+
+<br><br>
+
+#### Extraction of results 
+```{r}
+dds3_res <- results(dds3, contrast = c("con", "metastasis", "vertical"))
+dds3_res
+```
+
+log2 fold change : condition MET vs VGP, indicating that VGP is the base level of comparison.
+
+<br><br>
+
+#### The MA plot 
+
+```{r}
+plotMA(dds3, ylim=c(-20,20))
+```
+The genes that are significantly DE are colored blue. 
+
+<br><br>
+
+#### LFC shrinkage 
+
+
+```{r}
+dds3_LFC <- lfcShrink(dds3,
+                      coef = "con_metastasis_vs_vertical" ,
+                      res = dds3_res)
+```
+
+```{r}
+plotMA(dds3_LFC, ylim=c(-20,20))
+```
+Now we see more restricted log2fold change values, especially for lowly expressed genes.
+
+<br><br>
+
+### DESeq2 results table
+#### Getting description for the coloumns in the results table
+```{r}
+mcols(dds3_LFC)
+```
+
+<br><br>
+
+#### Determine siginificant DE genes, 
+
+```{r}
+head(dds3_LFC,n =10 )
+```
+
+<br><br>
+
+#### Siginificant DE genes summary 
+```{r}
+summary(dds3_LFC)
+```
+Over 5000 genes are DE. 
+<br> <br
+
+```{r}
+summary(dds3_LFC, alpha = 0.05)
+```
+
+<br><br>
+
+##### Testing for siginifcant genes using both an alpha value threshold and a log2fold change threshold different from 0
+```{r}
+#Rerun results function, Using 1.25 foldchange threshold which is 0.32 in the log2 scale 
+dds3_res <- results(dds3, 
+                    contrast = c("con", "metastasis", "vertical"),
+                    alpha = 0.05,
+                 #   lfcThreshold = 0.32
+                 ) 
+```
+
+
+
+```{r}
+#Reshrink the foldchanges 
+dds3_LFC <- lfcShrink(dds3,
+                      coef = "con_metastasis_vs_vertical" ,
+                      res = dds3_res)
+```
+
+<br><br>
+
+#### Annotaion of the genes
+
+```{r}
+# Turn results table into a data frame 
+dds3_res_df <- data.frame(dds3_LFC)
+head (dds3_res_df)
+```
+
+```{r}
+
+dds3_res_anno <- rownames_to_column(dds3_res_df, var = "ensgene") 
+
+```
+
+```{r}
+dds3_res_anno <- left_join(x = dds3_res_anno,
+                 y = grch38[, c("ensgene", "symbol", "description")],
+                  by = c("ensgene"))
+```
+
+```{r}
+View(dds3_res_anno)
+```
+
+<br><br>
+
+#### Extraction of the siginficant DE genes
+```{r}
+dds3_sig <- subset(dds3_res_anno, padj < 0.05)
+```
+
+<br><br>
+
+#### Ordering the genes by padjusted values 
+```{r}
+dds3_sig <- dds3_sig %>% arrange(padj)
+```
+
+<br><br>
+
+#### Exploring the final table 
+```{r}
+#View(dds3_sig)
+```
+
+```{r}
+dds3_first20 <- dds3_sig[1:20,]
+
+write.csv(dds3_first20, "dds3_first20.csv", row.names = F)
+```
+
+<br><br>
+
+### Visualization of the results
+
+#### Expression heatmap
+
+```{r}
+# Subset normalized counts to significant genes 
+sig_norm_counts3 <- norm_counts[dds3_sig$ensgene,]
+
+# Choose a color palette from RColorBrewerlibrary(RColorBrewer)
+heat_colors <- brewer.pal(6,"YlOrRd")
+display.brewer.all()
+
+```
+
+
+```{r}
+# Run pheatmap
+pheatmap(sig_norm_counts3,
+         color = heat_colors, 
+         cluster_rows =T,
+         show_rownames =F,
+         annotation = dplyr::select(colData, con),
+         scale ="row")
+##error NA/NAN vlaues
+```
+  
+
+<br><br>
+
+#### Removing Nas and runnig pheatmap again
+```{r}
+sig_norm_counts2[sig_norm_counts2==0] <- NA
+ 
+# Delete the rows associated with NA.
+
+sig_norm_counts2<-sig_norm_counts2[complete.cases(sig_norm_counts2),]
+```
+
+```{r}
+# Run pheatmap
+#pheatmap(sig_norm_counts2,
+      #   color = heat_colors, 
+       #  cluster_rows =T,
+        # show_rownames =F,
+         #annotation = select(colData2, con2),
+         #scale ="row")
+```
+
+<br><br>
+
+#### Visualizing results-Expression plot
+
+```{r}
+top3_20 <- data.frame(sig_norm_counts3)[1:20,]  %>% rownames_to_column(var ="ensgene")
+top3_20 <- gather(top3_20, key ="samplename", value ="normalized_counts",9:14)
+```
+
+
+```{r}
+top3_20 <- inner_join(top3_20, rownames_to_column(colData, var ="samplename"),                     by ="samplename")
+```
+
+
+```{r}
+ggplot(top3_20)+ 
+  geom_point(aes(x = ensgene, y = normalized_counts, color = con))+        scale_y_log10()+    
+  xlab("Genes")+      
+  ylab("Normalized Counts")+       
+  ggtitle("Top 20 Significant DE Genes")+  
+  theme_bw()+    
+  theme(axis.text.x = element_text(angle =45, hjust =1))+  
+  theme(plot.title = element_text(hjust =0.5))
+
+```
+
+
+##########################
+
+
+```{r}
+
+## Subset normalized counts to significant genes 
+sig3_norm_symbol <- norm_counts[dds3_sig$ensgene,]
+
+#apply this to norm counts
+sig3_norm_symbol <- rownames_to_column(as.data.frame(sig3_norm_symbol), var = "ensgene")
+
+#pick symbol from gr38
+sig3_norm_symbol <- left_join(x =  sig3_norm_symbol,
+                 y = grch38[ , c("ensgene", "symbol")],
+                  by = c("ensgene"))
+
+#remove duplicates
+sig3_norm_symbol <- unique(sig3_norm_symbol)
+```
+
+```{r}
+head(sig3_norm_symbol)
+
+```
+
+
+```{r}
+top3_20_symbol <- data.frame(sig3_norm_symbol)[1:20,]  %>% rownames_to_column(var ="ids")
+
+#remove ids column
+top3_20_symbol <- top3_20_symbol[,-1]
+
+#key column will be a seperate column
+top3_20_symbol <- gather(top3_20_symbol, key ="samplename", value ="normalized_counts",10:14)
+```
+  
+
+```{r}
+
+top3_20_symbol <- inner_join(top3_20_symbol, rownames_to_column(colData, var ="samplename"),                     by ="samplename")
+```
+
+
+```{r}
+ggplot(top3_20_symbol)+ 
+  geom_point(aes(x = symbol, y = normalized_counts, color = con))+        scale_y_log10()+    
+  xlab("Genes")+      
+  ylab("Normalized Counts")+       
+  ggtitle("Top 20 Significant DE Genes")+  
+  theme_bw()+    
+  theme(axis.text.x = element_text(angle =45, hjust =1))+  
+  theme(plot.title = element_text(hjust =0.5))
+
+```
+
+#### Heatmap
+
+
+
+```{r}
+#remove duplicates
+sig3_norm_symbol <- unique(sig3_norm_symbol)
+
+#get 1st 50
+sig3_norm_symbol <- sig3_norm_symbol[1:70,]
+
+#change symbol to be rownames instead of ensembl ids
+row.names(sig3_norm_symbol) <- sig3_norm_symbol$symbol
+
+#remove first and last column 
+sig3_norm_symbol <- sig3_norm_symbol[,c(-1,-16)]
+```
+
+```{r}
+# Run pheatmap
+pheatmap(sig3_norm_symbol[1:30,],
+         color = heat_colors, 
+         cluster_rows =F,
+         show_rownames =T,
+         annotation = dplyr::select(colData, con),
+         scale ="row")
+```
+
+```{r}
+pheatmap(sig3_norm_symbol[1:30,],
+         #color = heat_colors, 
+         cluster_rows =F,
+         show_rownames =T,
+         annotation = dplyr::select(colData, con),cluster_cols=T,               fontsize_row = 7,
+         scale ="row")
+
+```
+
+
+```{r}
+# Run pheatmap
+pheatmap(sig3_norm_symbol[1:30,5:14],
+         #color = heat_colors, 
+         cluster_rows =F,
+         cluster_cols = F,
+         show_rownames =T,
+         annotation = dplyr::select(colData, con),
+         fontsize_row = 7,
+         scale ="row")
+```
+
+
+
+####################
+
+
+
+<br><br>
+
+### Find Specific genes in every phase-comparison
+#### Subset unmatched rows from data frame  
+Now, we have three tables of DE genes. 
+* The first one represents the DE genes from normal to RGP.
+* The second one represents the DE genes from RGP to VGP.
+* The third one represents the DE genes from VGP to MET.
+
+```{r}
+#normal vs RGP
+head(dds1_sig) 
+```
+
+
+```{r}
+#RGP vs VGP
+head(dds2_sig) 
+```
+
+
+```{r}
+#VGP vs MET
+head(dds3_sig) 
+```
+
+<br><br><br><br>
+
+#### Normal vs RGP
+
+We will use the anti_join() from dplyr package to filter out the specific genes which is related only to the development of cells from normal to RGP.
+The idea is to subtract from both phases ("RGP vs VGP" table and "VGP vs MET")
+
+```{r}
+#subtract from "RGP vs VGP" table (dds2_sig) 
+dds1_1 <-anti_join(dds1_sig, dds2_sig, by= c("ensgene", "symbol"))
+head(dds1_1)
+```
+
+<br><br>
+
+#### now we will subtract the new dataframe from the last phase only
+
+```{r}
+#subtract from "VGP vs MET" table (dds3_sig) 
+dds1_1 <-anti_join(dds1_1, dds3_sig, by= c("ensgene", "symbol"))
+View(dds1_1)
+```
+
+
+So now we only have genes that are specific to Normal vs RGP and are not shared with other developmental  phases.
+```{r}
+#save the DE genes in a table
+
+write.table(dds1_1,file = "DE_norm_RGP.txt", sep = "\t", row.names = FALSE)
+
+```
+<br><br>
+
+
+```{r}
+#to be written in the results section
+dds_1_1_first20 <- dds1_1[1:20,]
+write.csv(dds_1_1_first20,file = "DE_norm_RGP_1st_20.csv", row.names = FALSE)
+```
+
+
+### for DAVID analysis
+```{r}
+genes1_1 <- as.factor(dds1_1$symbol)
+write.table(genes1_1, "genes1_1.txt")
+```
+
+```{r}
+export(genes1_1, "genes1_1.xlsx")
+```
+
+
+
+#### RGP vs VGP
+The idea is to subtract from both phases ("normal vs RGP" and "VGP vs MET")
+
+```{r}
+#subtract from "normal vs RGP"
+dds2_2 <-anti_join(dds2_sig, dds1_sig, by= c("ensgene", "symbol"))
+View(dds2_2)
+```
+
+
+
+```{r}
+#subtract from "VGP vs MET"
+dds2_2 <-anti_join(dds2_2, dds3_sig, by= c("ensgene", "symbol"))
+View(dds2_2)
+```
+
+reduced from 897 Genes to 602.
+
+```{r}
+#save the DE genes in a table
+
+write.csv(dds2_2,file = "DE_RGP_VGP.csv", row.names = FALSE)
+
+```
+
+```{r}
+#to be written in the results section
+dds2_2_first20 <- dds2_2[1:20,]
+write.csv(dds2_2_first20,file = "DE_RGP_VGP_1st_20.csv", row.names = FALSE)
+```
+
+
+<br><br>
+
+#### VGP vs MET
+We will use the same approach 
+```{r}
+#subtract from "normal vs RGP(dds1_sig)"
+dds3_3 <-anti_join(dds3_sig, dds1_sig, by= c("ensgene", "symbol"))
+View(dds3_3)
+```
+
+
+```{r}
+#subtract from "RGP vs VGP"
+dds3_3 <-anti_join(dds3_3, dds2_sig, by= c("ensgene", "symbol"))
+View(dds3_3)
+```
+
+Genes are reduced from 1208 to 913 genes, which are specific only for this phase from vertical growth phase to Metastasis.
+
+```{r}
+#save the DE genes in a table
+write.table(dds3_3, file = "DE_VGP_MET.txt", sep = " ", col.names = NA)
+
+```
+
+```{r}
+#to be written in the results section
+dds3_3_first20 <- dds3_3[1:20,]
+write.csv(dds3_3_first20,file = "DE_VGP_MET_1st_20.csv", row.names = FALSE)
+```
+
+GO 
+GSEQ 
+
+
+#### Drawing a venndiagram
+ 				venn.diagram(list("list C"=C, "list D"=D), fill = c("yellow","cyan"), cex = 1.5, filename="Lesson-06/Venn_diagram_genes_2.png")
+
+				venn.diagram(list(A = A, C = C, D = D), fill = c("yellow","red","cyan"), cex = 1.5,filename="Lesson-06/Venn_diagram_genes_3.png")
+
+				venn.diagram(list(A = A, B = B, C = C, D = D), fill = c("yellow","red","cyan","forestgreen"), cex = 1.5,filename="Lesson-06/Venn_diagram_genes_4.png")
+
+				
+```{r}
+#install.packages("VennDiagram")
+library(VennDiagram)
+```
+
+
+```{r}
+#venn.diagram(list(A = dds1_omit, C = dds2_omit, D = dds3_omit), fill = c("yellow","red","cyan"), cex = 1.5,filename="Venn_diagram_genes_3.png")
+
+```
+
+
+```{r}
+which(is.na(dds1_sig))
+```
+
+```{r}
+sum(is.na(dds1_sig))
+```
+delete na values 
+```{r}
+dds1_omit <- na.omit(dds1_sig)
+```
+
+
+```{r}
+sum(is.na(dds1_omit))
+```
+
+
+```{r}
+dds2_omit <- na.omit(dds2_sig)
+dds3_omit <- na.omit(dds3_sig)
+
+```
+
+
+```{r}
+grid.newpage()                                       
+draw.triple.venn(area1 = 10,                         
+                 area2 = 10,
+                 area3 = 10,
+                 n12 = 2,
+                 n23 = 2,
+                 n13 = 2,
+                 n123 = 1,
+                 fill = c("pink", "green", "orange"),
+                 lty = "blank",
+              category = c("normal_Vs_RGP", "RGP_Vs_VGP", "VGP_Vs_MET"))
+```
+
+
+
+```{r}
+head(dds1_omit)
+```
+
+```{r}
+dds1_venn <- dds1_omit$ensgene
+class(dds1_venn)
+```
+
+```{r}
+dds2_venn <- dds2_omit$ensgene
+class(dds2_venn)
+```
+
+```{r}
+dds3_venn <- dds3_omit$ensgene
+ 
+```
+
+
+
+```{r}
+venn.diagram(list("normal vs RGP" = dds1_venn, "RGP vs VGP" = dds2_venn, "VGP vs MET" = dds3_venn), fill = c("yellow","red","cyan"), cex = 1.5,filename="Venn_diagram_1.png")
+
+```
+
+ 
+
+# Actually plot the plot
+grid.draw(venn.plot)
+
+```{r}
+venn.plot <- draw.pairwise.venn(length(dds1_venn),
+                                length(dds2_venn),
+                                # Calculate the intersection of the two sets
+                                length( intersect(dds1_venn, dds2_venn) ),
+                                category = c("Normal vs. RGP", "RGP vs. VGP"), scaled = F,
+                                fill = c("light blue", "pink"), alpha = rep(0.5, 2),
+                                cat.pos = c(0, 0)) ;
+grid.draw(venn.plot);
+grid.newpage();
+```
+
+```{r}
+```
+
+
+```{r}
+library(gplots)
+# Create a Venn-diagram given just the list of gene-names for both sets
+#venn(list("IPSC Trisomic vs Disomic" = ipsc.degs,
+#          "NEURON Trisomic vs Disomic" = neur.degs), )
+```
+
+
+```{r}
+library(gplots)
+venn(list("NHEMs vs. RGP" = dds1_venn,
+          "RGP vs. VGP" = dds2_venn, 
+     "VGP vs. MET"= dds3_venn))
+```
+
+
+```{r}
+venn(list("RGP vs VGP" = dds2_venn, 
+     "VGP vs MET"= dds3_venn), )
+```
+
+
+#### Functional annotation 
+Now, we will use clusterProfiler to perform:
+* Over representation analysis
+* Gene Set Enrichment Analysis GSEA
+
+```{r}
+library(org.Hs.eg.db)
+library(DOSE)
+library(pathview)
+library(clusterProfiler)
+library(AnnotationHub)
+library(ensembldb)
+library(enrichplot)
+library(ggnewscale)
+library(tidyverse)
+```
+To perform the over-representation analysis, we need a list of background genes and a list of significant genes. For our background dataset we will use all genes tested for differential expression (all genes in our results table). For our significant gene list we will use genes with p-adjusted values less than 0.05 (we could include a fold change threshold too if we have many DE genes).
+
+```{r}
+## Create background dataset for hypergeometric testing using all genes tested for significance in the results                 
+allOE_genes <- as.character(dds1_res_anno$ensgene)
+
+## Extract significant results
+sigOE <- dplyr::filter(dds1_res_anno, padj < 0.05)
+
+sigOE_genes <- as.character(sigOE$ensgene) #genes vector
+```
+
+
+Now we can perform the GO enrichment analysis and save the results:
+
+```{r}
+## Run GO enrichment analysis 
+ego <- enrichGO(gene = sigOE_genes, 
+                universe = allOE_genes,
+                keyType = "ENSEMBL",
+                OrgDb = org.Hs.eg.db, 
+                ont = "BP", 
+                pAdjustMethod = "BH", 
+                qvalueCutoff = 0.05, 
+                readable = TRUE)
+                
+## Output results from GO analysis to a table
+cluster_summary <- data.frame(ego)
+
+write.csv(cluster_summary, "GO1_NorRad.csv")
+```
+
+```{r}
+
+ORA1_1st_20 <- cluster_summary[1:20,]
+write.csv(ORA1_1st_20, "ORA1_1st_20.csv", row.names = F)
+```
+
+
+
+
+##### Visualizing clusterProfiler results
+
+clusterProfiler has a variety of options for viewing the over-represented GO terms. We will explore the dotplot, enrichment plot, and the category netplot.
+
+The dotplot shows the number of genes associated with the first 50 terms (size) and the p-adjusted values for these terms (color). This plot displays the top 50 genes by gene ratio (# genes related to GO term / total number of sig genes), not p-adjusted value.
+
+#### Dotplot 
+```{r}
+dotplot(ego, showCategory=10, title = "GO Biological process enrichment Normal vs. RGP")  
+
+```
+
+```{r}
+barplot(ego, showCategory = 20, label_format = 60) + ggtitle("GO enrichment Normal vs. RGP")
+```
+
+
+
+```{r}
+head(ego2)
+```
+
+
+
+The next plot is the enrichment GO plot, which shows the relationship between the top 50 most significantly enriched GO terms (padj.), by grouping similar terms together. The color represents the p-values relative to the other displayed terms (brighter red is more significant) and the size of the terms represents the number of genes that are significant from our list.
+
+
+a network with edges connecting overlapping gene sets. In this way, mutually overlapping gene sets are tend to cluster together, making it easy to identify functional module.
+```{r}
+## Enrichmap clusters the 50 most significant (by padj) GO terms to visualize relationships between terms
+#emapplot(ego, showCategory = 10)
+
+##Error in has_pairsim(x)  Please use pairwise_termsim function to deal with the results of enrichment analysis.
+```
+
+```{r}
+x2 <- pairwise_termsim(ego)
+emapplot(x2, showCategory = 10, label_format= 40, cex_category=.8)
+```
+
+
+Finally, the category netplot shows the relationships between the genes associated with the top five most significant GO terms and the fold changes of the significant genes associated with these terms (color). The size of the GO terms reflects the pvalues of the terms, with the more significant terms being larger. 
+This plot is particularly useful for hypothesis generation in identifying genes that may be important to several of the most affected processes.
+
+## To color genes by log2 fold changes, we need to extract the log2 fold changes from our results table creating a named vector
+```{r}
+OE_foldchanges <- sigOE$log2FoldChange
+
+names(OE_foldchanges) <- sigOE$symbol
+```
+
+
+```{r}
+## Cnetplot details the genes associated with one or more terms - by default gives the top 5 significant terms (by padj)
+cnetplot(ego, 
+         categorySize="pvalue", 
+         showCategory = 5, 
+         foldChange=OE_foldchanges, 
+         vertex.label.font=3,
+         ggrepel.max.overlaps = Inf,
+          )
+```
+
+
+```{r}
+ego2 <- data.frame(ego)
+View(ego2)
+```
+
+If you are interested in significant processes that are not among the top five, you can subset your ego dataset to only display these processes:
+
+
+```{r}
+# find index to subset
+which(ego2$ID == "GO:0042438") #melanin biosynthetic process
+which(ego2$ID == "GO:0048021") #regulation of melanin biosynthetic 
+which(ego2$ID == "GO:0010631") #epithelial cell migration
+which(ego2$ID == "GO:0043473") #Pigmentation
+which(ego2$ID == "GO:0050673") #epithelial cell proliferation
+which(ego2$ID == "GO:0043588") #skin development
+```
+
+
+
+```{r}
+## Subsetting the ego results without overwriting original `ego` variable
+ego3 <- ego
+
+ego3@result <- ego@result[c(140
+,611,14,71,45),]
+
+## Plotting terms of interest
+cnetplot(ego3, 
+         categorySize="pvalue", 
+         foldChange=OE_foldchanges, 
+         showCategory = 5, 
+         vertex.label.font=6)
+
+```
+
+```{r}
+head(ego3)
+```
+
+```{r}
+## convert gene ID to Symbol
+edox <- setReadable(ego, 'org.Hs.eg.db', 'ENTREZID')
+p1 <- cnetplot(edox, foldChange=OE_foldchanges)
+
+## categorySize can be scaled by 'pvalue' or 'geneNum'
+p2 <- cnetplot(edox, categorySize="pvalue", foldChange=OE_foldchanges)
+p3 <- cnetplot(edox,showCategory = 3, foldChange=OE_foldchanges, circular = TRUE, colorEdge = TRUE) 
+cowplot::plot_grid(p1, p2, p3, ncol=3, labels=LETTERS[1:3], rel_widths=c(.8, .8, 1.2))
+```
+
+
+```{r}
+cowplot::plot_grid( p3, rel_widths=c(.8, .8, 1.2))
+```
+#############################################################
+# RGP vs VGP
+## Create background dataset for hypergeometric testing using all genes tested for significance in the results                 
+
+```{r}
+allOE_genes2 <- as.character(dds2_res_anno$ensgene)
+```
+
+
+## Extract significant results
+
+```{r}
+sigOE2 <- dplyr::filter(dds2_res_anno, padj < 0.05)
+
+sigOE_genes2 <- as.character(sigOE2$ensgene) #genes vector
+```
+
+
+
+Now we can perform the GO enrichment analysis and save the results:
+
+```{r}
+## Run GO enrichment analysis 
+ego2 <- enrichGO(gene = sigOE_genes2, 
+                universe = allOE_genes2,
+                keyType = "ENSEMBL",
+                OrgDb = org.Hs.eg.db, 
+                ont = "BP", 
+                pAdjustMethod = "BH", 
+                qvalueCutoff = 0.05, 
+                readable = TRUE)
+                
+## Output results from GO analysis to a table
+cluster_summary2 <- data.frame(ego2)
+
+write.csv(cluster_summary2, "GO2_RGP_VGP.csv")
+```
+
+
+```{r}
+## Run GO enrichment analysis aALL
+ego2 <- enrichGO(gene = sigOE_genes2, 
+                universe = allOE_genes2,
+                keyType = "ENSEMBL",
+                OrgDb = org.Hs.eg.db, 
+                ont = "ALL", 
+                pAdjustMethod = "BH", 
+                qvalueCutoff = 0.05, 
+                readable = TRUE)
+                
+## Output results from GO analysis to a table
+cluster_summary2_ALL <- data.frame(ego2)
+View(cluster_summary2_ALL)
+#write.csv(cluster_summary2, "GO2_RGP_VGP.csv")
+```
+
+
+
+##### Visualizing clusterProfiler results
+
+clusterProfiler has a variety of options for viewing the over-represented GO terms. We will explore the dotplot, enrichment plot, and the category netplot.
+
+The dotplot shows the number of genes associated with the first 50 terms (size) and the p-adjusted values for these terms (color). This plot displays the top 50 genes by gene ratio (# genes related to GO term / total number of sig genes), not p-adjusted value.
+
+#### Dotplot 
+```{r}
+dotplot(ego2, showCategory=20, title = "GO Biological process enrichment RGP vs. VGP",label_format = 20)  
+
+```
+
+```{r}
+barplot(ego2, showCategory = 20, label_format = 60) + ggtitle("GO enrichment RGP vs. VGP")
+```
+#############################################################
+
+#############################################################
+# VGP vs. MET
+## Create background dataset for hypergeometric testing using all genes tested for significance in the results                 
+
+```{r}
+allOE_genes3 <- as.character(dds3_res_anno$ensgene)
+```
+
+
+## Extract significant results
+
+```{r}
+sigOE3 <- dplyr::filter(dds3_res_anno, padj < 0.05)
+
+sigOE_genes3 <- as.character(sigOE3$ensgene) #genes vector
+```
+
+
+
+Now we can perform the GO enrichment analysis and save the results:
+
+```{r}
+## Run GO enrichment analysis 
+ego3 <- enrichGO(gene = sigOE_genes3, 
+                universe = allOE_genes3,
+                keyType = "ENSEMBL",
+                OrgDb = org.Hs.eg.db, 
+                ont = "BP", 
+                pAdjustMethod = "BH", 
+                qvalueCutoff = 0.05, 
+                readable = TRUE)
+                
+## Output results from GO analysis to a table
+cluster_summary3 <- data.frame(ego3)
+
+write.csv(cluster_summary, "GO3_VGP_MET.csv")
+```
+
+```{r}
+
+ORA3_1st_20 <- cluster_summary3[1:20,]
+write.csv(ORA3_1st_20, "ORA3_1st_20.csv", row.names = F)
+```
+
+```{r}
+## Run GO enrichment analysis All 
+ego3_all <- enrichGO(gene = sigOE_genes3, 
+                universe = allOE_genes3,
+                keyType = "ENSEMBL",
+                OrgDb = org.Hs.eg.db, 
+                ont = "ALL", 
+                pAdjustMethod = "BH", 
+                qvalueCutoff = 0.05, 
+                readable = TRUE)
+                
+## Output results from GO analysis to a table
+cluster_summary3_All <- data.frame(ego3)
+
+write.csv(cluster_summary3_All, "GO3_VGP_MET.csv")
+```
+
+
+##### Visualizing clusterProfiler results
+
+clusterProfiler has a variety of options for viewing the over-represented GO terms. We will explore the dotplot, enrichment plot, and the category netplot.
+
+The dotplot shows the number of genes associated with the first 50 terms (size) and the p-adjusted values for these terms (color). This plot displays the top 50 genes by gene ratio (# genes related to GO term / total number of sig genes), not p-adjusted value.
+
+#### Dotplot 
+```{r}
+dotplot(ego3_all, showCategory=20, title = "GO Biological process enrichment VGP vs. MET",label_format = 20)  
+
+```
+
+
+
+```{r}
+barplot(ego3_all, showCategory = 80, label_format = 60) + ggtitle("GO enrichment VGP vs. MET")
+```
+#############################################################
+
+
+### Gene set Enrichement analysis using GSEA Java-based
+
+#### preparing normalized counts for GSEA 
+```{r}
+#convert norm_counts to df
+norm_counts_df <- data.frame(norm_counts)
+```
+
+
+
+```{r}
+norm_counts_GSEA <- norm_counts_df %>% mutate(desc= NA, .before="NHEM76")
+```
+
+```{r}
+head(norm_counts_GSEA)
+```
+
+```{r}
+# give the genes coloumn a proper name
+norm_counts_GSEA <- cbind(ID  = rownames(norm_counts_GSEA), norm_counts_GSEA)
+head(norm_counts_GSEA)
+```
+
+
+```{r}
+# remove original rownames
+#rownames(norm_counts_GSEA ) <- NULL
+```
+ 
+```{r}
+head(norm_counts_GSEA)
+```
+ 
+
+```{r}
+#save the normalized counts in a table ready for GSEA Java based program
+write.table(norm_counts_GSEA, file = "GSEA/Normal2_GSEA.txt", sep = "\t", row.names = F)
+
+```
+
+
+
+```{r}
+#write.table(norm_counts, file = "GSEA/norm_counts.tsv", sep= "\t", col.names = NA)
+
+```
+
+
+```{r}
+export(norm_counts, rowNames = T, "GSEA/norm_counts.xlsx")
+```
+
+
+
+#### preparing normalized counts for GSEA 
+```{r}
+#convert norm_counts to df
+norm_counts_df <- data.frame(norm_counts)
+normal_Radial_GSEA <- norm_counts_df %>% dplyr::select(1:4)
+head(normal_Radial_GSEA)
+```
+
+```{r}
+normal_Radial_GSEA <- normal_Radial_GSEA %>% mutate(desc= NA, .before="NHEM76")
+```
+
+```{r}
+head(normal_Radial_GSEA)
+```
+
+```{r}
+# give the genes coloumn a proper name
+normal_Radial_GSEA <- cbind(ID  = rownames(normal_Radial_GSEA), normal_Radial_GSEA)
+head(normal_Radial_GSEA)
+```
+
+
+
+```{r}
+# remove original rownames
+rownames(normal_Radial_GSEA ) <- NULL
+```
+ 
+```{r}
+head(normal_Radial_GSEA)
+```
+ 
+
+```{r}
+#save the normalized NormalVSRadial counts in a table
+write.table(normal_Radial_GSEA, file = "normal_Rad_GSEA.txt", sep = "\t", row.names = F)
+
+```
+
+
+```{r}
+export(normal_Radial_GSEA, "normal_Rad_GSEA.xlsx")
+```
+
+```{r}
+class(normal_Radial_GSEA)
+```
+
+```{r}
+head(normal_Radial_GSEA)
+```
+
+
+
+
+```{r}
+#DAVID1 <- read.table("DAVID/Norm_Rad/chart_AAD5D588820E1657803685183.tsv", sep ="\t", header = T)
+```
+
+
+
+```{r}
+#head(DAVID1)
+```
+
+```{r}
+#barplot
+#ggplot(DAVID1[1:5], aes(x=Count, y = Term))
+#+geom_bar()
+```
+
+
+
+
+### GSEA
+Steps toward doing gene set enrichment analysis (GSEA):
+
+ 1- obtaining stats for ranking genes in your experiment,
+ 2- creating a named vector out of the DESeq2 result
+ 3- Obtaining a gene set from mysigbd
+ 4- doing analysis
+
+already we performed DESeq2 analysis and have statistics for working on it
+
+```{r}
+#dds1_GSEA<- results(dds, 
+             #      contrast = c("con", "radial", "normal"),
+                 #   alpha = 0.05)
+```
+
+
+```{r}
+head(dds1_GSEA)
+```
+
+```{r}
+head(dds1_res_anno)
+```
+```{r}
+dds1_GSEA_df <- data.frame(dds1_GSEA)
+```
+
+
+```{r}
+
+dds1_GSEA_anno <- rownames_to_column(dds1_GSEA_df, var = "ensgene") 
+head(dds1_GSEA_anno)
+```
+
+```{r}
+dds1_GSEA_anno <- left_join(x = dds1_GSEA_anno,
+                 y = grch38[, c("ensgene", "symbol", "description")],
+                  by = c("ensgene"))
+head(dds1_GSEA_anno)
+```
+
+#### Remove Duplicates
+```{r}
+#non_duplicates <- which(duplicated(ids$symbol) == FALSE)
+
+```
+
+
+
+
+```{r}
+# remove the NAs, averaging statitics for a multi-hit symbol
+dds1_GSEA_final <- dds1_GSEA_anno %>% 
+  dplyr::select(symbol, stat) %>% 
+  distinct() %>% 
+  group_by(symbol) %>% 
+  summarize(stat=mean(stat))
+```
+
+```{r}
+head(dds1_GSEA_final)
+```
+
+# creating  a named vector [ranked genes]
+
+```{r}
+ranks <- dds1_GSEA_final$stat
+names(ranks) <- dds1_GSEA_final$symbol
+```
+
+```{r}
+#BiocManager::install("fgsea")
+library("fgsea")
+```
+
+
+```{r}
+# Load the pathway (gene set) into a named list
+# downloaded mysigdb
+pathways.hallmark <- gmtPathways("GSEA/GSEA_R/h.all.v7.5.1.symbols.gmt")
+
+```
+
+```{r}
+# show a few lines from the pathways file
+head(pathways.hallmark)
+```
+
+```{r}
+#Running fgsea algorithm:
+fgseaRes1 <- fgseaMultilevel(pathways=pathways.hallmark, stats=ranks)
+```
+
+```{r}
+# Tidy the results:
+fgseaResTidy <- fgseaRes1 %>%
+  as_tibble() %>%
+  arrange(desc(NES)) # order by normalized enrichment score (NES)
+
+```
+
+
+```{r}
+# To see what genes are in each of these pathways:
+gene_in_pathway <- pathways.hallmark %>% 
+  enframe("pathway", "symbol") %>% 
+  unnest(cols = c(symbol)) %>% 
+  inner_join(dds1_GSEA_final, by="symbol")
+```
+
+
+# VISUALIZATION
+
+```{r}
+
+#__________bar plot _______________#
+# Plot the normalized enrichment scores. 
+#Color the bar indicating whether or not the pathway was significant:
+fgseaResTidy$adjPvalue <- ifelse(fgseaResTidy$padj <= 0.05, "significant", "non-significant")
+cols <- c("non-significant" = "grey", "significant" = "red")
+ggplot(fgseaResTidy, aes(reorder(pathway, NES), NES, fill = adjPvalue)) +
+  geom_col() +
+  scale_fill_manual(values = cols) +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) +
+  coord_flip() +
+  labs(x="Pathway", y="Normalized Enrichment Score",
+  title="Hallmark pathways Enrichment Score from GSEA")
+```
+
+
+```{r}
+#__________Enrichment  Plot_______#
+# Enrichment plot for E2F target gene set
+plotEnrichment(pathway = pathways.hallmark[["HALLMARK_E2F_TARGETS"]], ranks)
+```
+
+
+```{r}
+plotGseaTable(pathways.hallmark[fgseaRes1$pathway[fgseaRes1$padj < 0.05]], ranks, fgseaRes1, 
+              gseaParam=0.5)
+```
+
+
+
+#### Over representation analysis using clusterProfiler and MSigDB
+```{r}
+hallmark <- read.gmt("GSEA/GSEA_R/h.all.v7.5.1.symbols.gmt")
+```
+
+
+```{r}
+head(hallmark)
+```
+
+
+```{r}
+#install.packages("msigdbr")
+library(msigdbr)
+msigdbr_show_species()
+```
+
+#### Retrieveing Human gene set
+```{r}
+Human_df <- msigdbr(species = "Homo sapiens")
+head(Human_df, 2) %>% as.data.frame
+```
+
+#### using Hallmark :
+```{r}
+hm_t2g <- msigdbr(species = "Homo sapiens", category = "H")%>%  dplyr::select(gs_name, ensembl_gene)
+head(hm_t2g)
+```
+
+
+#### MSigDb over-presentaton analysis
+```{r}
+hm_ora <- enricher(sigOE_genes, TERM2GENE=hm_t2g)
+head(hm_ora)
+```
+
+```{r}
+dotplot(hm_ora, showCategory=25, title = "Hallmarks",label_format = 55)
+
+```
+```{r}
+barplot(hm_ora, showCategory = 15)
+```
+
+#### ORA Hallmarks RGP vs VGP 
+```{r}
+## Create background dataset for hypergeometric testing using all genes tested for significance in the results                 
+allOE2_genes <- as.character(dds2_res_anno$ensgene)
+
+## Extract significant results
+sigOE2 <- dplyr::filter(dds2_res_anno, padj < 0.05)
+
+sigOE2_genes <- as.character(sigOE2$ensgene) #genes vector
+```
+
+
+
+
+```{r}
+hm_ora_RGP_VGP <- enricher(sigOE2_genes, TERM2GENE=hm_t2g)
+View(as.data.frame(hm_ora_RGP_VGP))
+```
+
+```{r}
+barplot(hm_ora_RGP_VGP)
+```
+
+
+```{r}
+head(sigOE2_genes)
+```
+
+#### ORA Hallmarks VGP vs MET 
+```{r}
+## Create background dataset for hypergeometric testing using all genes tested for significance in the results                 
+allOE3_genes <- as.character(dds3_res_anno$ensgene)
+
+## Extract significant results
+sigOE3 <- dplyr::filter(dds3_res_anno, padj < 0.05)
+
+sigOE3_genes <- as.character(sigOE3$ensgene) #genes vector
+```
+
+```{r}
+hm_ora_VGP_MET <- enricher(sigOE3_genes, TERM2GENE=hm_t2g)
+View(as.data.frame(hm_ora_VGP_MET))
+```
+
+```{r}
+barplot(hm_ora_VGP_MET)
+```
+
+
+
+
+
+Multiple comparison overtime #cancelled.
+how the genes behave overtime #cancelled. 
+time dependancy #cancelled  .
+time series #cancelled 
+we have 7 gene sets GO term list based on genes 
+vis of diff exp in each step
+
+#writing #introduction #material and methods  
+ref 
+bioc
+hashes with work illustration 
+
+```{r}
+
+```
+
+
+
+
+
+
