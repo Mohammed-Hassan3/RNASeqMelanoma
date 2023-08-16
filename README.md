@@ -21,6 +21,7 @@ RGP (Sbcl-2), vertical growth phase VGP (WM3211, WM1366, WM793), and melanoma ME
 The RNA-Seq dataset used in this study is a standard Illumina data set (Paired-end) obtained from Prof. Dr. Melanie Kappelmann-Fenzl. The RNA-Seq dataset was shared through the sFTP server from the 
 supercomputer cluster server of the Deggendorf Institute of Technology. In addition, the data is publically available in the NCBI database (https://www.ncbi.nlm.nih.gov/bioproject/PRJNA839865).
 All experimental working steps were performed at the University of Erlangen (FAU) at the Institute of Biochemistry previous to the data analysis performed in this study. 
+
 The bioinformatical analyses are based on already published sequencing data of the aforementioned cell lines. The preparation of the sequencing library involved at least two biological replicates. RNA-Seq was carried out using Illumina HiSeq2000 with the paired-end module, following Illumina's paired-end RNA-Sequencing (RNA-Seq) protocols (Illumina, Inc.)(Kappelmann-Fenzl et al., 2019). 
 The RNA-Seq dataset was shared through the sFTP server from the supercomputer cluster server of the Deggendorf Institute of Technology, each file in the FASTQ file format. The used data are now publicly 
 available on the NCBI database (https://www.ncbi.nlm.nih.gov/bioproject/PRJNA839865).
