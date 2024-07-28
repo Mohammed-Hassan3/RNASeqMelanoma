@@ -1,3 +1,2 @@
-linguist-language=R
-linguist-language=Bash
+*.Rmd linguist-language=R 
 
